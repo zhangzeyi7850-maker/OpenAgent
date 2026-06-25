@@ -429,6 +429,59 @@ describe("buildStartConversationRequest", () => {
     });
   });
 
+  it("injects the configured image MCP server without exposing the raw API key", () => {
+    vi.stubEnv("VITE_IMAGE_MCP_BASEURL", "https://image.example.test/mcp");
+    vi.stubEnv("VITE_IMAGE_MCP_TRANSPORT", "shttp");
+    vi.stubEnv("VITE_IMAGE_MCP_NAME", "codex-image");
+    vi.stubEnv("IMAGE_MCP_API_KEY", "raw-secret-must-not-leak");
+
+    const payload = buildStartConversationRequest({
+      settings: {
+        ...DEFAULT_SETTINGS,
+        agent_settings: {
+          ...DEFAULT_SETTINGS.agent_settings,
+          mcp_config: {
+            mcpServers: {
+              fetch: { command: "uvx", args: ["mcp-server-fetch"] },
+            },
+          },
+        },
+      },
+    }) as unknown as {
+      agent_settings: {
+        mcp_config: { mcpServers: Record<string, unknown> };
+      };
+    };
+
+    expect(payload.agent_settings.mcp_config.mcpServers).toMatchObject({
+      fetch: { command: "uvx", args: ["mcp-server-fetch"] },
+      "codex-image": {
+        transport: "streamable-http",
+        url: "https://image.example.test/mcp",
+        headers: { Authorization: "Bearer ${IMAGE_MCP_API_KEY}" },
+      },
+    });
+    expect(JSON.stringify(payload)).not.toContain("raw-secret-must-not-leak");
+  });
+
+  it("adds image generation guidance when the image MCP server is configured", () => {
+    vi.stubEnv("VITE_IMAGE_MCP_BASEURL", "https://image.example.test/mcp");
+    vi.stubEnv("VITE_IMAGE_MCP_TRANSPORT", "streamable_http");
+    vi.stubEnv("VITE_IMAGE_MCP_NAME", "codex-image");
+
+    const payload = buildStartConversationRequest({
+      settings: DEFAULT_SETTINGS,
+    }) as {
+      agent_settings: { agent_context: Record<string, unknown> };
+    };
+
+    const suffix = payload.agent_settings.agent_context
+      .system_message_suffix as string;
+    expect(suffix).toContain("<IMAGE_GENERATION_MCP>");
+    expect(suffix).toContain("codex-image");
+    expect(suffix).toContain("generate_image");
+  });
+
   it("serializes custom secrets as host-relative LookupSecret entries", () => {
     const payload = buildStartConversationRequest({
       settings: {

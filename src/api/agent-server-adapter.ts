@@ -91,6 +91,15 @@ const DEFAULT_TOOL_NAMES = [
 ];
 const BROWSER_TOOL_SET_NAME = "browser_tool_set";
 const TASK_TOOL_SET_NAME = "task_tool_set";
+const IMAGE_MCP_BASEURL_ENV = "VITE_IMAGE_MCP_BASEURL";
+const IMAGE_MCP_TRANSPORT_ENV = "VITE_IMAGE_MCP_TRANSPORT";
+const IMAGE_MCP_NAME_ENV = "VITE_IMAGE_MCP_NAME";
+const IMAGE_MCP_API_KEY_ENV = "IMAGE_MCP_API_KEY";
+const IMAGE_MCP_AUTHORIZATION_HEADER = "Authorization";
+const IMAGE_MCP_TRANSPORT_SSE = "sse";
+const IMAGE_MCP_TRANSPORT_STREAMABLE_HTTP = "streamable-http";
+const IMAGE_MCP_API_KEY_PLACEHOLDER = "${IMAGE_MCP_API_KEY}";
+const IMAGE_MCP_AUTHORIZATION_VALUE = `Bearer ${IMAGE_MCP_API_KEY_PLACEHOLDER}`;
 
 function browserToolsEnabled() {
   return import.meta.env.VITE_ENABLE_BROWSER_TOOLS !== "false";
@@ -437,6 +446,116 @@ function normalizeSecretString(value: unknown): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
+function getBuildTimeImageMcpValue(value: unknown): string | undefined {
+  return normalizeSecretString(value);
+}
+
+function getImageMcpEnvValue(
+  envKey: string,
+  buildTimeValue: unknown,
+): string | undefined {
+  const value = normalizeSecretString(import.meta.env[envKey]);
+  return value ?? getBuildTimeImageMcpValue(buildTimeValue);
+}
+
+function normalizeImageMcpTransport(value: unknown): string | undefined {
+  const normalized = normalizeSecretString(value)
+    ?.toLowerCase()
+    .replace(/_/g, "-");
+  if (!normalized) return IMAGE_MCP_TRANSPORT_STREAMABLE_HTTP;
+
+  switch (normalized) {
+    case "shttp":
+    case IMAGE_MCP_TRANSPORT_STREAMABLE_HTTP:
+      return IMAGE_MCP_TRANSPORT_STREAMABLE_HTTP;
+    case IMAGE_MCP_TRANSPORT_SSE:
+      return IMAGE_MCP_TRANSPORT_SSE;
+    default:
+      return undefined;
+  }
+}
+
+function getConfiguredImageMcpServer(): {
+  name: string;
+  server: SettingsRecord;
+} | null {
+  const url = getImageMcpEnvValue(
+    IMAGE_MCP_BASEURL_ENV,
+    typeof __IMAGE_MCP_BASEURL__ === "string" ? __IMAGE_MCP_BASEURL__ : "",
+  );
+  const name = getImageMcpEnvValue(
+    IMAGE_MCP_NAME_ENV,
+    typeof __IMAGE_MCP_NAME__ === "string" ? __IMAGE_MCP_NAME__ : "",
+  );
+  const transport = normalizeImageMcpTransport(
+    getImageMcpEnvValue(
+      IMAGE_MCP_TRANSPORT_ENV,
+      typeof __IMAGE_MCP_TRANSPORT__ === "string"
+        ? __IMAGE_MCP_TRANSPORT__
+        : "",
+    ),
+  );
+
+  if (!url || !name || !transport) return null;
+
+  return {
+    name,
+    server: {
+      transport,
+      url,
+      headers: {
+        [IMAGE_MCP_AUTHORIZATION_HEADER]: IMAGE_MCP_AUTHORIZATION_VALUE,
+      },
+    },
+  };
+}
+
+function mergeConfiguredImageMcpConfig(
+  value: unknown,
+): SettingsRecord | undefined {
+  const configuredServer = getConfiguredImageMcpServer();
+  const mcpConfig = toRecord(value);
+  const mcpServers = toRecord(mcpConfig.mcpServers);
+
+  if (!configuredServer) {
+    return Object.keys(mcpConfig).length > 0 && "mcpServers" in mcpConfig
+      ? mcpConfig
+      : undefined;
+  }
+
+  return {
+    ...mcpConfig,
+    mcpServers: {
+      ...mcpServers,
+      [configuredServer.name]: configuredServer.server,
+    },
+  };
+}
+
+function buildImageGenerationSystemSuffix(): string | undefined {
+  const configuredServer = getConfiguredImageMcpServer();
+  if (!configuredServer) return undefined;
+
+  return [
+    "<IMAGE_GENERATION_MCP>",
+    `An image-generation MCP server named '${configuredServer.name}' is configured for this conversation.`,
+    "When the user asks you to generate, create, draw, or edit an image, call the generate_image tool from that MCP server instead of only describing the image.",
+    "Save or move generated image output into the current workspace when the tool returns image bytes or a file path, then report the saved path to the user.",
+    `The MCP server reads its API key from the backend '${IMAGE_MCP_API_KEY_ENV}' environment variable; do not ask the user for it and do not print it.`,
+    "</IMAGE_GENERATION_MCP>",
+  ].join("\n");
+}
+
+function joinSystemMessageSuffixes(
+  ...suffixes: Array<unknown>
+): string | undefined {
+  const parts = suffixes
+    .map((suffix) => normalizeSecretString(suffix))
+    .filter((suffix): suffix is string => !!suffix);
+
+  return parts.length > 0 ? parts.join("\n\n") : undefined;
+}
+
 function isPlainRecord(value: unknown): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value);
 }
@@ -621,7 +740,13 @@ function buildBundledSkills(): BundledSkill[] {
 
 function buildAgentContext(agentSettings: SettingsRecord): SettingsRecord {
   const runtimeServicesSuffix = buildRuntimeServicesSystemSuffix();
+  const imageGenerationSuffix = buildImageGenerationSystemSuffix();
   const existingContext = toRecord(agentSettings.agent_context);
+  const systemMessageSuffix = joinSystemMessageSuffixes(
+    existingContext.system_message_suffix,
+    runtimeServicesSuffix,
+    imageGenerationSuffix,
+  );
 
   // Merge bundled public skills with any skills already present in the
   // agent context (e.g. user-defined skills set via the settings API).
@@ -645,8 +770,8 @@ function buildAgentContext(agentSettings: SettingsRecord): SettingsRecord {
     load_public_skills: false,
     load_user_skills: true,
     load_project_skills: true,
-    ...(runtimeServicesSuffix
-      ? { system_message_suffix: runtimeServicesSuffix }
+    ...(systemMessageSuffix
+      ? { system_message_suffix: systemMessageSuffix }
       : {}),
   };
 }
@@ -713,8 +838,8 @@ function buildConfiguredAcpAgentSettings(
   // so the ACP subprocess connects to the configured MCP servers at session
   // creation. Only include it when it actually carries servers — an empty or
   // malformed value is dropped rather than sending ``mcp_config: {}``.
-  const mcpConfig = toRecord(agentSettings.mcp_config);
-  if (Object.keys(mcpConfig).length > 0 && "mcpServers" in mcpConfig) {
+  const mcpConfig = mergeConfiguredImageMcpConfig(agentSettings.mcp_config);
+  if (mcpConfig) {
     payload.mcp_config = mcpConfig;
   }
 
@@ -774,8 +899,10 @@ function buildConfiguredOpenHandsAgentSettings(
     delete llm.subscription_vendor;
   }
 
-  const mcpConfig = toRecord(agentSettings.mcp_config);
-  if (Object.keys(mcpConfig).length === 0 || !("mcpServers" in mcpConfig)) {
+  const mcpConfig = mergeConfiguredImageMcpConfig(agentSettings.mcp_config);
+  if (mcpConfig) {
+    agentSettings.mcp_config = mcpConfig;
+  } else {
     delete agentSettings.mcp_config;
   }
 

@@ -55,12 +55,23 @@ const appBuildConfig = {
 };
 
 export default defineConfig(({ mode }) => {
+  const rawEnv = loadEnv(mode, process.cwd(), "");
+  const imageMcpFallbackEnabled = mode !== "test";
   const {
     VITE_BACKEND_HOST = "127.0.0.1:8000",
     VITE_USE_TLS = "false",
     VITE_FRONTEND_PORT = "3001",
     VITE_INSECURE_SKIP_VERIFY = "false",
-  } = loadEnv(mode, process.cwd());
+    VITE_IMAGE_MCP_BASEURL = imageMcpFallbackEnabled
+      ? (rawEnv.IMAGE_MCP_BASEURL ?? "")
+      : "",
+    VITE_IMAGE_MCP_TRANSPORT = imageMcpFallbackEnabled
+      ? (rawEnv.IMAGE_MCP_TRANSPORT ?? "")
+      : "",
+    VITE_IMAGE_MCP_NAME = imageMcpFallbackEnabled
+      ? (rawEnv.IMAGE_MCP_NAME ?? "")
+      : "",
+  } = rawEnv;
 
   const isLibraryBuild = process.env.BUILD_LIB === "true";
   const USE_TLS = VITE_USE_TLS === "true";
@@ -80,6 +91,9 @@ export default defineConfig(({ mode }) => {
       __EXTENSIONS_SKILLS_DIR__: JSON.stringify(
         isLibraryBuild ? "" : EXTENSIONS_SKILLS_DIR,
       ),
+      __IMAGE_MCP_BASEURL__: JSON.stringify(VITE_IMAGE_MCP_BASEURL),
+      __IMAGE_MCP_TRANSPORT__: JSON.stringify(VITE_IMAGE_MCP_TRANSPORT),
+      __IMAGE_MCP_NAME__: JSON.stringify(VITE_IMAGE_MCP_NAME),
     },
     plugins: [
       {
